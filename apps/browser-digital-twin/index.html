@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ai-web-os digital twin hello</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --muted: #94a3b8;
+      --text: #e5e7eb;
+      --accent: #22c55e;
+      --line: #1f2937;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 0%, #1e293b 0%, var(--bg) 60%);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .panel {
+      background: color-mix(in srgb, var(--panel) 92%, black);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    h1 { font-size: 24px; margin: 0 0 12px; }
+    h2 { font-size: 15px; margin: 0 0 8px; color: #cbd5e1; }
+    .kv { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .muted { color: var(--muted); }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 1px solid #334155;
+      background: #0b1222;
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button.primary { border-color: #15803d; color: #dcfce7; }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      line-height: 1.4;
+      color: #bbf7d0;
+      min-height: 120px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid #14532d;
+      color: #dcfce7;
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AI Web OS: Digital Twin Hello</h1>
+    <div class="tag">Phase 1 browser simulation</div>
+    <div class="grid">
+      <section class="panel">
+        <h2>Simulated Hardware</h2>
+        <div class="kv">
+          <span class="muted">Physical memory bytes</span><span id="memSize"></span>
+          <span class="muted">CPU.pc</span><span id="cpuPc"></span>
+          <span class="muted">CPU.tick</span><span id="cpuTick"></span>
+          <span class="muted">IRQ pending</span><span id="irq"></span>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Core State Snapshot</h2>
+        <div class="kv">
+          <span class="muted">tick_count</span><span id="tickCount"></span>
+          <span class="muted">last_event_type</span><span id="eventType"></span>
+          <span class="muted">last_event_data</span><span id="eventData"></span>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Controls</h2>
+        <div class="controls">
+          <button id="btnTick" class="primary">Tick</button>
+          <button id="btnTimerIrq">Trigger Timer IRQ</button>
+          <button id="btnReset">Reset</button>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Runtime Log</h2>
+        <pre id="log"></pre>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const hw = {
+      memory: new Uint8Array(64 * 1024),
+      cpu: { pc: 0, tick: 0 },
+      irqPending: false
+    };
+
+    const core = {
+      tickCount: 0,
+      lastEventType: 0,
+      lastEventData: 0
+    };
+
+    function log(message) {
+      const el = document.getElementById("log");
+      const line = `[${new Date().toISOString()}] ${message}\n`;
+      el.textContent = line + el.textContent;
+    }
+
+    function aiwosTick(nowNs) {
+      core.tickCount += 1;
+      hw.cpu.tick += 1;
+      hw.cpu.pc += 4;
+      hw.memory[hw.cpu.tick % hw.memory.length] = hw.cpu.tick & 0xff;
+      log(`tick -> now_ns=${nowNs} tick_count=${core.tickCount}`);
+    }
+
+    function aiwosHandleEvent(type, data) {
+      core.lastEventType = type;
+      core.lastEventData = data;
+      hw.irqPending = false;
+      log(`event -> type=${type} data=${data}`);
+    }
+
+    function nowNs() {
+      return BigInt(Date.now()) * 1000000n;
+    }
+
+    function render() {
+      document.getElementById("memSize").textContent = hw.memory.length.toString();
+      document.getElementById("cpuPc").textContent = hw.cpu.pc.toString();
+      document.getElementById("cpuTick").textContent = hw.cpu.tick.toString();
+      document.getElementById("irq").textContent = hw.irqPending ? "yes" : "no";
+      document.getElementById("tickCount").textContent = core.tickCount.toString();
+      document.getElementById("eventType").textContent = core.lastEventType.toString();
+      document.getElementById("eventData").textContent = core.lastEventData.toString();
+    }
+
+    document.getElementById("btnTick").addEventListener("click", () => {
+      aiwosTick(nowNs());
+      render();
+    });
+
+    document.getElementById("btnTimerIrq").addEventListener("click", () => {
+      hw.irqPending = true;
+      aiwosHandleEvent(2, 42);
+      render();
+    });
+
+    document.getElementById("btnReset").addEventListener("click", () => {
+      hw.cpu.pc = 0;
+      hw.cpu.tick = 0;
+      hw.irqPending = false;
+      hw.memory.fill(0);
+      core.tickCount = 0;
+      core.lastEventType = 0;
+      core.lastEventData = 0;
+      log("state reset");
+      render();
+    });
+
+    log("digital twin hello initialized");
+    render();
+  </script>
+</body>
+</html>
+
