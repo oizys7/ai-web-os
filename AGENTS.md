@@ -12,6 +12,30 @@ The central design principle is:
 - Build the same core logic for Wasm during early visualization and for native machine code when performance or kernel integration is required.
 - Treat AI model capabilities as first-class operating system infrastructure, not as an application-layer add-on.
 
+## Language Policy
+
+This repository currently uses only the following main languages:
+
+- `C`
+- `JavaScript`
+- `TypeScript`
+- `Rust`
+- `Python`
+
+Language responsibilities:
+
+- `C`: ABI interfaces, fixed-width data contracts, and a limited amount of HAL interaction glue.
+- `Rust`: core modules that need to be compiled to Wasm and portable runtime components.
+- `JavaScript` and `TypeScript`: browser frontend pages, simulation UI, and later React components.
+- `Python`: large model, machine learning, AI orchestration, evaluation, and automation tooling.
+
+Rules:
+
+- Prefer `C` for native ABI boundaries and host/HAL interop.
+- Prefer `Rust` for Wasm-targeted logic and environment-portable core modules.
+- Prefer `JavaScript` and `TypeScript` for frontend and browser simulation work.
+- Prefer `Python` for AI and ML related work outside the core runtime path.
+
 ## AI-Native OS Direction
 
 This OS should explore what an operating system becomes when AI models, agents, embeddings, vector memory, and tool execution are treated as foundational capabilities.
@@ -150,9 +174,9 @@ Use the browser as a fast development and visualization environment.
 
 Target architecture:
 
-- Frontend: HTML, CSS, JavaScript, or TypeScript.
-- Core modules: Rust or C/C++ compiled to WebAssembly.
-- Hardware simulation: JavaScript-side simulated memory, CPU registers, interrupts, timers, disks, and device events.
+- Frontend: JavaScript or TypeScript, with HTML/CSS for presentation.
+- Core modules: Rust compiled to WebAssembly.
+- Hardware simulation: JavaScript or TypeScript simulated memory, CPU registers, interrupts, timers, disks, and device events.
 - Runtime boundary: pass data and host capabilities into Wasm through explicit ABI/API interfaces.
 
 Expected outcomes:
@@ -199,7 +223,7 @@ Route A: Wasm runtime route
 
 Route B: native static library route
 
-- Reuse Rust or C/C++ source code directly.
+- Reuse Rust or C source code directly.
 - Compile core logic into static libraries or kernel objects.
 - Replace browser or test HAL implementations with real HAL and kernel APIs.
 - Examples: replace simulated allocation with `kmalloc` or kernel allocator wrappers, replace simulated timers with real timer/interrupt integration, replace simulated storage with real block device access.
@@ -228,8 +252,10 @@ Hard requirements:
 
 Preferred languages:
 
-- Rust for stronger safety boundaries and `no_std` readiness.
-- C or C++ when C ABI compatibility, existing libraries, or CMake integration are more important.
+- C for ABI surfaces and HAL interop.
+- Rust for stronger safety boundaries, `no_std` readiness, and Wasm-targeted modules.
+- JavaScript and TypeScript for browser and frontend work.
+- Python for AI, ML, and model-development tooling.
 
 ### HAL Layer
 
@@ -258,7 +284,7 @@ Rust implementations should use conditional compilation with `cfg` features such
 - `target_os = "wasi"`
 - feature flags like `hal_browser`, `hal_wasi`, `hal_native`, `hal_kernel`, and `hal_baremetal`
 
-C/C++ implementations should use CMake options and preprocessor definitions such as:
+C implementations should use CMake options and preprocessor definitions such as:
 
 - `AI_WEB_OS_HAL_BROWSER`
 - `AI_WEB_OS_HAL_WASI`
@@ -308,7 +334,7 @@ Recommended host capability groups:
 
 ## Build System Direction
 
-Use CMake as the cross-language orchestration layer when C/C++ modules or multi-target native builds are required.
+Use CMake as the cross-language orchestration layer when C or Rust modules, or multi-target native builds, are required.
 
 Expected build targets:
 
@@ -317,6 +343,7 @@ Expected build targets:
 - Native user-space target for fast tests and benchmarks.
 - Static library target for future kernel or bare-metal integration.
 - AI runtime adapter targets for local, browser, remote, mock, and accelerator-backed model providers.
+- Python-based AI experiment, training, evaluation, and automation targets where needed.
 
 Guidelines:
 
@@ -404,3 +431,4 @@ When working in this repository:
 - Treat AI model outputs as untrusted inputs unless a narrower trust model is explicitly documented.
 - Keep AI providers, prompts, retrieval, and agent tool calls behind typed, auditable service interfaces.
 - Preserve deterministic fallbacks for AI-assisted policies whenever system behavior must be tested or replayed.
+- Do not add new languages without a specific, documented need.
