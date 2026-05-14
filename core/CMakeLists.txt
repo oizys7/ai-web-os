@@ -1,5 +1,6 @@
 add_library(aiwos_core STATIC
     src/core_logic.c
+    src/scheduler.c
     src/aiwos_module.c
 )
 
