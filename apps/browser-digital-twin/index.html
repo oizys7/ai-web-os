@@ -106,6 +106,7 @@
   </div>
 
   <script>
+    // 这里用纯 JS 模拟硬件环境，后续可以替换为 Wasm 核心模块。
     const hw = {
       memory: new Uint8Array(64 * 1024),
       cpu: { pc: 0, tick: 0 },
@@ -125,6 +126,7 @@
     }
 
     function aiwosTick(nowNs) {
+      // 模拟一次调度 tick：推进 CPU 状态，并把结果写回“物理内存”。
       core.tickCount += 1;
       hw.cpu.tick += 1;
       hw.cpu.pc += 4;
@@ -133,6 +135,7 @@
     }
 
     function aiwosHandleEvent(type, data) {
+      // 模拟中断进入核心状态机，便于观察事件驱动的状态变化。
       core.lastEventType = type;
       core.lastEventData = data;
       hw.irqPending = false;
@@ -181,4 +184,3 @@
   </script>
 </body>
 </html>
-

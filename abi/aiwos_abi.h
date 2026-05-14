@@ -8,6 +8,7 @@
 extern "C" {
 #endif
 
+/* 版本号用于宿主和模块在初始化时做 ABI 兼容性检查。 */
 #define AIWOS_ABI_VERSION 1u
 
 typedef enum aiwos_status {
@@ -39,7 +40,9 @@ typedef struct aiwos_state_snapshot {
 
 typedef struct aiwos_host_api {
     uint32_t host_abi_version;
+    /* 宿主侧日志入口，核心层只通过这里输出信息。 */
     void (*log)(const char *message, size_t len);
+    /* 宿主侧时间入口，用于获取单调或近似单调的纳秒时间戳。 */
     uint64_t (*now_ns)(void);
 } aiwos_host_api_t;
 
@@ -55,4 +58,3 @@ void aiwos_shutdown(void);
 #endif
 
 #endif
-

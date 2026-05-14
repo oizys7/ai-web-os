@@ -22,6 +22,7 @@ uint32_t aiwos_abi_version(void) {
 }
 
 int32_t aiwos_init(const aiwos_host_api_t *host) {
+    /* 初始化阶段先校验 ABI，再复制宿主能力，避免后续直接依赖外部状态。 */
     if (host == 0 || host->host_abi_version != AIWOS_ABI_VERSION || host->log == 0 || host->now_ns == 0) {
         return AIWOS_ERR_INCOMPATIBLE_ABI;
     }
@@ -42,6 +43,7 @@ int32_t aiwos_tick(uint64_t now_ns) {
         return AIWOS_ERR_NOT_INITIALIZED;
     }
 
+    /* 核心状态推进只依赖内部状态和显式时间输入。 */
     g_state.tick_count = aiwos_core_next_tick(g_state.tick_count);
     g_state.last_now_ns = now_ns;
     aiwos_log_literal("aiwos_tick: tick advanced");
@@ -56,6 +58,7 @@ int32_t aiwos_handle_event(const aiwos_event_t *event) {
         return AIWOS_ERR_INVALID_ARGUMENT;
     }
 
+    /* 事件先进入核心层，再更新快照，便于后续做回放和可视化。 */
     aiwos_core_apply_event(&g_state, event);
     aiwos_log_literal("aiwos_handle_event: event applied");
     return AIWOS_OK;
@@ -84,9 +87,9 @@ void aiwos_shutdown(void) {
         return;
     }
 
+    /* 退出时清空宿主引用和内部快照，避免下次初始化误用旧状态。 */
     aiwos_log_literal("aiwos_shutdown: shutdown complete");
     memset(&g_host, 0, sizeof(g_host));
     memset(&g_state, 0, sizeof(g_state));
     g_initialized = 0;
 }
-
