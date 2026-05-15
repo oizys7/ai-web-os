@@ -3,4 +3,5 @@ build/
 *.user
 *.VC.db
 *.VC.VC.opendb
+.claude/settings.local.json
 

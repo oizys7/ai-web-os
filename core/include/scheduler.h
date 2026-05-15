@@ -71,11 +71,17 @@ typedef struct aiwos_scheduler {
 
 /* ============ 核心调度函数声明 ============ */
 
-/* 调度器初始化 */
+/* 调度器创建 (malloc + init)，返回堆分配的调度器 */
+aiwos_scheduler_t* aiwos_scheduler_create(void);
+
+/* 调度器初始化 (用于栈或已分配对象) */
 void aiwos_scheduler_init(aiwos_scheduler_t *sched);
 
 /* 调度器关闭 */
 void aiwos_scheduler_shutdown(aiwos_scheduler_t *sched);
+
+/* 调度器销毁 (清理资源并 free，仅用于 create 创建的) */
+void aiwos_scheduler_destroy(aiwos_scheduler_t *sched);
 
 /* 选择下一个要运行的任务 */
 aiwos_task_t* aiwos_schedule_next(aiwos_scheduler_t *sched);
