@@ -4,4 +4,6 @@ build/
 *.VC.db
 *.VC.VC.opendb
 .claude/settings.local.json
+target/
+Cargo.lock
 

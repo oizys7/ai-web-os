@@ -1,45 +1,47 @@
-# ai-web-os Hello World
+# ai-web-os
 
-这是 `ai-web-os` 的最小可运行框架，用来验证当前的分层思路：
+AI 原生操作系统的核心框架，验证"核心逻辑可移植、宿主可替换、浏览器可视化"的分层架构。
 
-- `abi/`：稳定的 C ABI 接口
-- `core/`：与环境无关的核心逻辑
-- `hal/native/`：本机宿主层，负责日志和时间
-- `apps/native-hello/`：把 ABI、core、HAL 串起来的本机示例
-- `apps/browser-digital-twin/`：浏览器里的数字孪生示例
+## 分层原则
 
-这个最小版本的目标不是完整操作系统，而是先把“核心逻辑可移植、宿主可替换、浏览器可视化”这条链路跑通。
+```text
+abi/             ← C ABI 头文件，稳定接口（跨语言调用边界）
+core/            ← Rust 核心实现，编译为 staticlib / wasm
+hal/{native}/    ← 宿主能力实现（C，通过函数指针注入 core）
+apps/*           ← 示例程序
+```
 
-## 当前支持的 hello world
-
-1. 本机 hello world
-2. 浏览器数字孪生 hello world
+- **ABI 用 C 定义**：C 是操作系统的"lingua franca"，所有语言都能调
+- **核心用 Rust 实现**：内存安全、Wasm 一等公民、开发效率更高
+- **宿主可替换**：core 通过 `aiwos_host_api_t` 函数指针调用宿主，不直接依赖任何平台 API
 
 ## 目录说明
 
-- `AGENTS.md`：项目约束、分层原则和后续开发规则
-- `abi/`：跨模块稳定接口
-- `core/`：纯逻辑，不直接依赖浏览器或操作系统 API
-- `hal/native/`：Windows 下的本机宿主实现
-- `apps/native-hello/`：本机示例程序
-- `apps/browser-digital-twin/`：浏览器可视化示例
+- `abi/`：稳定的 C ABI 接口（纯头文件，`aiwos_abi.h`）
+- `core/`：Rust 核心实现（调度器、状态机），编译为：
+  - `staticlib`（本机 x64，供 C 程序链接）
+  - `cdylib`（wasm32，供浏览器加载）
+- `hal/native/`：Windows 本机宿主（日志、时间、内存分配）
+- `apps/native-hello/`：本机示例，C 程序链接 Rust 核心
+- `apps/browser-digital-twin/`：浏览器数字孪生，加载 Wasm 核心
 
 ## 依赖与版本
 
 ### 语言
 
-- C: `C11`
+- Rust: `2021 edition`（编译核心）
+- C: `C11`（ABI 定义 + 宿主 HAL）
 - HTML/CSS/JavaScript: 浏览器示例使用原生前端技术
 
 ### 构建工具
 
-- CMake: `4.1.2`
+- CMake: `4.1.2`（构建本机 C 程序）
+- Cargo: Rust 构建工具（构建核心）
 
 ### 编译器
 
-- MSVC: `19.44.35219.0`
-- clang: `19.1.6`
-- GCC: `14.2.0`
+- MSVC: `19.44.35219.0`（本机 C/Rust 链接）
+- wasm32-unknown-unknown: Rust Wasm 目标
 
 ### 平台
 
@@ -48,46 +50,54 @@
 
 ## 构建与运行
 
-### 1. 配置和构建本机示例
+### 1. 本机示例
 
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
+.\build\apps\native-hello\Release\aiwos_native_hello.exe
 ```
 
-### 2. 运行本机 hello world
+预期输出包含两个宿主的运行结果：
 
-```powershell
-Start-Process -FilePath "C:\code\ai\ai-web-os\build\apps\native-hello\Release\aiwos_native_hello.exe" -NoNewWindow -Wait
+- Native HAL：真实系统时钟、Windows API 日志
+- Simple HAL：模拟时间、printf 日志
+
+核心行为在两个宿主上一致：init → tick → event → query → shutdown，shutdown 后调用被正确拒绝。
+
+### 2. 浏览器数字孪生
+
+Wasm 需要 HTTP 协议加载，不能用 `file://` 直接打开：
+
+```bash
+cd apps/browser-digital-twin
+python -m http.server 8080
 ```
 
-预期输出包含：
-
-- `hello ai-web-os`
-- `tick_count=1`
-- `last_event_type=2`
-- `last_event_data=42`
-
-### 3. 打开浏览器数字孪生
-
-直接在浏览器中打开：
-
-- `C:\code\ai\ai-web-os\apps\browser-digital-twin\index.html`
+浏览器打开 `http://localhost:8080`。
 
 按钮说明：
 
-- `Tick`：推进一次模拟核心 tick
-- `Trigger Timer IRQ`：注入一个定时器中断事件
-- `Reset`：清空模拟硬件状态和核心快照
+- **Tick**：调 `aiwos_tick(now_ns)`，推进调度器 vruntime、检查阻塞超时
+- **Trigger Timer IRQ**：注入定时器中断（type=2, data=42）
+- **Trigger Interrupt**：注入普通中断（type=1）
+- **Reset**：`shutdown → re-init` 完整生命周期
 
-## 当前实现说明
+浏览器页面加载 `core/` 编译出的真实 Wasm 核心（非 JS 模拟），通过 `host_log` / `host_now_ns` 宿主回调与浏览器环境交互。
 
-这个 hello world 版本已经具备以下边界：
+### 3. 单独构建 Rust 核心（不经过 CMake）
 
-- 核心逻辑只处理状态变化，不直接操作浏览器 DOM
-- ABI 层使用固定结构体和错误码
-- HAL 层负责宿主相关能力，如日志和时间
-- 浏览器页面负责模拟硬件和展示状态
+```bash
+# 本机 staticlib
+cd core && cargo build --release
 
-后续如果加入 Wasm、Rust、AI 运行时、更多 HAL 或内核集成，这个 README 会继续补充对应的依赖和版本记录。
+# Wasm
+cd core && cargo build --target wasm32-unknown-unknown --release
+```
 
+## 当前状态
+
+- ABI v3：7 个错误码、2 种查询（SNAPSHOT / SCHEDULER_STATS）、3 种事件类型（NONE / INTERRUPT / TIMER）
+- Rust 核心实现 CFS 调度器（vruntime、权重、阻塞超时）
+- 本机宿主替换演示：同一个 `demo_host()` 驱动两个不同 HAL
+- 浏览器数字孪生：硬件模拟（CPU、内存、IRQ）在 JS，核心状态机在 Wasm

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ai-web-os digital twin hello</title>
+  <title>ai-web-os digital twin</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -70,8 +70,8 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>AI Web OS: Digital Twin Hello</h1>
-    <div class="tag">Phase 1 browser simulation</div>
+    <h1>AI Web OS: Digital Twin</h1>
+    <div class="tag">Phase 2 · Rust Wasm core + browser host</div>
     <div class="grid">
       <section class="panel">
         <h2>Simulated Hardware</h2>
@@ -83,11 +83,20 @@
         </div>
       </section>
       <section class="panel">
-        <h2>Core State Snapshot</h2>
+        <h2>Wasm Core Snapshot</h2>
         <div class="kv">
           <span class="muted">tick_count</span><span id="tickCount"></span>
           <span class="muted">last_event_type</span><span id="eventType"></span>
           <span class="muted">last_event_data</span><span id="eventData"></span>
+          <span class="muted">scheduler_state</span><span id="schedState"></span>
+          <span class="muted">task_count / ready / blocked</span><span id="taskCounts"></span>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Scheduler Stats</h2>
+        <div class="kv">
+          <span class="muted">total_ticks</span><span id="totalTicks"></span>
+          <span class="muted">min_vruntime</span><span id="minVruntime"></span>
         </div>
       </section>
       <section class="panel">
@@ -95,10 +104,11 @@
         <div class="controls">
           <button id="btnTick" class="primary">Tick</button>
           <button id="btnTimerIrq">Trigger Timer IRQ</button>
+          <button id="btnInterrupt">Trigger Interrupt</button>
           <button id="btnReset">Reset</button>
         </div>
       </section>
-      <section class="panel">
+      <section class="panel" style="grid-column: 1 / -1;">
         <h2>Runtime Log</h2>
         <pre id="log"></pre>
       </section>
@@ -106,81 +116,238 @@
   </div>
 
   <script>
-    // 这里用纯 JS 模拟硬件环境，后续可以替换为 Wasm 核心模块。
+    // ===========================================================================
+    // Simulated Hardware  (stays in JS — provides the "machine" visualization)
+    // ===========================================================================
     const hw = {
       memory: new Uint8Array(64 * 1024),
       cpu: { pc: 0, tick: 0 },
-      irqPending: false
+      irqPending: false,
     };
 
-    const core = {
-      tickCount: 0,
-      lastEventType: 0,
-      lastEventData: 0
-    };
-
-    function log(message) {
+    function log(text) {
       const el = document.getElementById("log");
-      const line = `[${new Date().toISOString()}] ${message}\n`;
-      el.textContent = line + el.textContent;
+      el.textContent += `[${new Date().toISOString().slice(11,19)}] ${text}\n`;
+      el.scrollTop = el.scrollHeight;
     }
 
-    function aiwosTick(nowNs) {
-      // 模拟一次调度 tick：推进 CPU 状态，并把结果写回“物理内存”。
-      core.tickCount += 1;
-      hw.cpu.tick += 1;
-      hw.cpu.pc += 4;
-      hw.memory[hw.cpu.tick % hw.memory.length] = hw.cpu.tick & 0xff;
-      log(`tick -> now_ns=${nowNs} tick_count=${core.tickCount}`);
+    // ===========================================================================
+    // Wasm Module  (loads the real Rust core)
+    // ===========================================================================
+    const AIWOS_QUERY_STATE_SNAPSHOT = 0;
+    const AIWOS_QUERY_SCHEDULER_STATS = 1;
+
+    let wasm = null;         // instance.exports
+    let initialized = false;
+
+    // ---------- host callbacks (provided to Wasm as "env" imports) ----------
+
+    function host_log(ptr, len) {
+      const bytes = new Uint8Array(wasm.memory.buffer, ptr, len);
+      log(new TextDecoder().decode(bytes));
     }
 
-    function aiwosHandleEvent(type, data) {
-      // 模拟中断进入核心状态机，便于观察事件驱动的状态变化。
-      core.lastEventType = type;
-      core.lastEventData = data;
-      hw.irqPending = false;
-      log(`event -> type=${type} data=${data}`);
-    }
-
-    function nowNs() {
+    function host_now_ns() {
       return BigInt(Date.now()) * 1000000n;
     }
 
+    // ---------- load & init Wasm ----------
+
+    async function loadWasm() {
+      const resp = await fetch("aiwos_core.wasm");
+      if (!resp.ok) throw new Error(`fetch failed (${resp.status}) — use a local server`);
+      const result = await WebAssembly.instantiate(await resp.arrayBuffer(), {
+        env: { host_log, host_now_ns },
+      });
+      wasm = result.instance.exports;
+      log(`Wasm loaded · exports: ${Object.keys(wasm).join(", ")}`);
+    }
+
+    function coreInit() {
+      // Bump allocator layout on wasm32:  host_api_t = 24 bytes
+      //   offset 0: host_abi_version (u32)
+      //   offset 4–20: fn pointers  (not used by Rust on wasm target)
+      wasm.aiwos_alloc_reset();
+      const ptr = wasm.aiwos_alloc(24);
+      if (!ptr) throw new Error("aiwos_alloc failed");
+      const dv = new DataView(wasm.memory.buffer);
+      dv.setUint32(ptr, 3, true);                // AIWOS_ABI_VERSION
+      const status = wasm.aiwos_init(ptr);
+      wasm.aiwos_alloc_reset();
+      if (status !== 0) throw new Error(`aiwos_init returned ${status}`);
+      initialized = true;
+      log("Core initialized");
+    }
+
+    function coreShutdown() {
+      if (!initialized) return;
+      wasm.aiwos_shutdown();
+      initialized = false;
+      log("Core shut down");
+    }
+
+    // ---------- read snapshot / stats from Wasm memory ----------
+
+    function readU32(dv, base) { return dv.getUint32(base, true); }
+    function readU64(dv, base) { return dv.getBigUint64(base, true); }
+
+    function readSnapshot() {
+      wasm.aiwos_alloc_reset();
+      const buf = wasm.aiwos_alloc(56);
+      if (!buf) return null;
+      const st = wasm.aiwos_query_state(AIWOS_QUERY_STATE_SNAPSHOT, buf, 56);
+      if (st !== 0) return null;
+      const dv = new DataView(wasm.memory.buffer, buf, 56);
+      const snap = {
+        tick_count:      readU64(dv, 0),
+        last_now_ns:     readU64(dv, 8),
+        last_event_type: readU32(dv, 16),
+        scheduler_state: readU32(dv, 20),
+        last_event_data: readU64(dv, 24),
+        task_count:      readU32(dv, 32),
+        ready_count:     readU32(dv, 36),
+        blocked_count:   readU32(dv, 40),
+      };
+      wasm.aiwos_alloc_reset();
+      return snap;
+    }
+
+    function readStats() {
+      wasm.aiwos_alloc_reset();
+      const buf = wasm.aiwos_alloc(56);
+      if (!buf) return null;
+      const st = wasm.aiwos_query_state(AIWOS_QUERY_SCHEDULER_STATS, buf, 56);
+      if (st !== 0) return null;
+      const dv = new DataView(wasm.memory.buffer, buf, 56);
+      const stats = {
+        total_ticks:  readU64(dv, 0),
+        last_tick_ns: readU64(dv, 8),
+        min_vruntime: readU64(dv, 16),
+        task_count:   readU32(dv, 24),
+        ready_count:  readU32(dv, 28),
+        blocked_count: readU32(dv, 32),
+      };
+      wasm.aiwos_alloc_reset();
+      return stats;
+    }
+
+    // ---------- helpers ----------
+
+    function nowNs() { return BigInt(Date.now()) * 1000000n; }
+
+    function schedStateName(s) {
+      return s === 0 ? "IDLE" : s === 1 ? "RUNNING" : s === 2 ? "SHUTDOWN" : "?";
+    }
+
+    // ---------- render UI from Wasm state ----------
+
     function render() {
-      document.getElementById("memSize").textContent = hw.memory.length.toString();
+      document.getElementById("memSize").textContent = hw.memory.length.toLocaleString();
       document.getElementById("cpuPc").textContent = hw.cpu.pc.toString();
       document.getElementById("cpuTick").textContent = hw.cpu.tick.toString();
       document.getElementById("irq").textContent = hw.irqPending ? "yes" : "no";
-      document.getElementById("tickCount").textContent = core.tickCount.toString();
-      document.getElementById("eventType").textContent = core.lastEventType.toString();
-      document.getElementById("eventData").textContent = core.lastEventData.toString();
+
+      if (initialized) {
+        const snap = readSnapshot();
+        if (snap) {
+          document.getElementById("tickCount").textContent = snap.tick_count.toString();
+          document.getElementById("eventType").textContent = snap.last_event_type.toString();
+          document.getElementById("eventData").textContent = snap.last_event_data.toString();
+          document.getElementById("schedState").textContent =
+            `${snap.scheduler_state} (${schedStateName(snap.scheduler_state)})`;
+          document.getElementById("taskCounts").textContent =
+            `${snap.task_count} / ${snap.ready_count} / ${snap.blocked_count}`;
+        }
+        const stats = readStats();
+        if (stats) {
+          document.getElementById("totalTicks").textContent = stats.total_ticks.toString();
+          document.getElementById("minVruntime").textContent = stats.min_vruntime.toString();
+        }
+      }
     }
 
-    document.getElementById("btnTick").addEventListener("click", () => {
-      aiwosTick(nowNs());
-      render();
-    });
+    // ===========================================================================
+    // Event Handlers
+    // ===========================================================================
 
-    document.getElementById("btnTimerIrq").addEventListener("click", () => {
-      hw.irqPending = true;
-      aiwosHandleEvent(2, 42);
-      render();
-    });
+    // construct an aiwos_event_t (16 bytes on wasm32) in Wasm memory and return its pointer
+    function allocEvent(type, data) {
+      // aiwos_event_t layout (repr(C)):
+      //   offset 0: type_ (u32)
+      //   offset 4: padding (4 bytes)
+      //   offset 8: data (u64)
+      wasm.aiwos_alloc_reset();
+      const ptr = wasm.aiwos_alloc(16);
+      if (!ptr) return 0;
+      const dv = new DataView(wasm.memory.buffer);
+      dv.setUint32(ptr, type, true);           // type_
+      dv.setUint32(ptr + 4, 0, true);          // padding
+      dv.setBigUint64(ptr + 8, BigInt(data), true);  // data
+      return ptr;
+    }
 
-    document.getElementById("btnReset").addEventListener("click", () => {
+    async function handleTick() {
+      if (!initialized) return;
+      const ns = nowNs();
+      wasm.aiwos_tick(ns);
+
+      // Advance simulated hardware (visual only)
+      hw.cpu.tick += 1;
+      hw.cpu.pc += 4;
+      hw.memory[hw.cpu.tick % hw.memory.length] = hw.cpu.tick & 0xff;
+      render();
+    }
+
+    async function handleEvent(type, data) {
+      if (!initialized) return;
+      const ptr = allocEvent(type, data);
+      if (!ptr) { log("allocEvent failed"); return; }
+      wasm.aiwos_handle_event(ptr);
+      hw.irqPending = false;
+      render();
+    }
+
+    async function handleReset() {
+      coreShutdown();
       hw.cpu.pc = 0;
       hw.cpu.tick = 0;
       hw.irqPending = false;
       hw.memory.fill(0);
-      core.tickCount = 0;
-      core.lastEventType = 0;
-      core.lastEventData = 0;
-      log("state reset");
+      coreInit();
       render();
-    });
+      log("State reset");
+    }
 
-    log("digital twin hello initialized");
-    render();
+    // ===========================================================================
+    // Wire up buttons
+    // ===========================================================================
+
+    document.getElementById("btnTick").addEventListener("click", handleTick);
+    document.getElementById("btnTimerIrq").addEventListener("click", () => handleEvent(2, 42));
+    document.getElementById("btnInterrupt").addEventListener("click", () => handleEvent(1, 0));
+    document.getElementById("btnReset").addEventListener("click", handleReset);
+
+    // ===========================================================================
+    // Bootstrap
+    // ===========================================================================
+
+    function renderInitial() {
+      document.getElementById("memSize").textContent = hw.memory.length.toLocaleString();
+    }
+
+    (async function boot() {
+      log("Booting ai-web-os digital twin…");
+      renderInitial();
+      try {
+        await loadWasm();
+        coreInit();
+        render();
+        log("Ready — core is live");
+      } catch (err) {
+        log(`BOOT FAILED: ${err.message}`);
+        document.getElementById("tickCount").textContent = "ERR";
+      }
+    })();
   </script>
 </body>
 </html>

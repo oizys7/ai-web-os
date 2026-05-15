@@ -1,0 +1,16 @@
+[package]
+name = "aiwos-core"
+version = "0.1.0"
+edition = "2021"
+description = "ai-web-os core — implements the C ABI from abi/aiwos_abi.h"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[profile.release]
+lto = true
+opt-level = "z"
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
