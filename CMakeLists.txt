@@ -7,6 +7,8 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(AI_WEB_OS_HAL_NATIVE "Build native HAL implementation" ON)
 
+enable_testing()
+
 add_subdirectory(core)
 add_subdirectory(hal/native)
 add_subdirectory(apps/native-hello)

@@ -33,7 +33,30 @@ target_link_libraries(test_scheduler
         aiwos_core
 )
 
+# ABI 测试可执行文件
+add_executable(test_abi
+    tests/test_abi.c
+)
+
+target_link_libraries(test_abi
+    PRIVATE
+        test_framework
+        aiwos_core
+)
+
+# Core 模块测试可执行文件
+add_executable(test_core
+    tests/test_core.c
+)
+
+target_link_libraries(test_core
+    PRIVATE
+        test_framework
+        aiwos_core
+)
+
 # 添加测试到 CTest
-enable_testing()
 add_test(NAME test_scheduler COMMAND test_scheduler)
+add_test(NAME test_abi COMMAND test_abi)
+add_test(NAME test_core COMMAND test_core)
 
