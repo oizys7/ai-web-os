@@ -1,43 +1,43 @@
-//! ai-web-os Core
+//! ai-web-os 核心
 //!
-//! Rust implementation of the core scheduler, compiled to:
-//! - **Wasm** (`cdylib` for wasm32) — loaded by the browser digital twin
-//! - **Native** (`staticlib` for x64) — linked by C host programs
+//! 核心调度器的 Rust 实现，编译为：
+//! - **Wasm**（为 wasm32 编译为 cdylib）—— 由浏览器数字孪生加载
+//! - **原生**（为 x64 编译为 staticlib）—— 由 C 宿主程序链接
 //!
-//! On both targets the public API is the same set of `extern "C"` functions
-//! defined in `abi/aiwos_abi.h`.  The only difference is how host callbacks
-//! (log, time) are resolved:
+//! 两种目标上的公开 API 都是 `abi/aiwos_abi.h` 中定义的同一组 `extern "C"` 函数。
+//! 唯一的区别是宿主回调（日志、时间）的解析方式：
 //!
-//! - **Wasm** — via `extern "C"` imports provided at instantiation
-//! - **Native** — function pointers stored from the `aiwos_host_api_t` struct
+//! - **Wasm** —— 通过实例化时提供的 `extern "C"` 导入
+//! - **原生** —— 从 `aiwos_host_api_t` 结构体存储的函数指针
 //!
-//! ## Build
+//! ## 构建
 //! ```bash
 //! # Wasm
 //! cargo build --target wasm32-unknown-unknown --release
 //!
-//! # Native staticlib
+//! # 原生 staticlib
 //! cargo build --release
 //! ```
 
-#![no_std]
+// 测试时需要 std（test runner 不兼容 no_std + 自定义 panic_handler）
+#![cfg_attr(not(test), no_std)]
 #![allow(non_camel_case_types)]
 #![allow(static_mut_refs)]
 
 use core::ptr;
 
 // ============================================================================
-// Host Callback Layer
+// 宿主回调层
 // ============================================================================
 
-// Wasm target: host provides these as imports via `WebAssembly.instantiate`.
+// Wasm 目标：宿主通过 `WebAssembly.instantiate` 提供这些导入。
 #[cfg(target_arch = "wasm32")]
 extern "C" {
     fn host_log(ptr: *const u8, len: usize);
     fn host_now_ns() -> u64;
 }
 
-// Native target: stored during `aiwos_init`, called via the function pointers.
+// 原生目标：在 `aiwos_init` 时存储，通过函数指针调用。
 #[cfg(not(target_arch = "wasm32"))]
 static mut HOST_LOG: Option<extern "C" fn(*const u8, usize)> = None;
 #[cfg(not(target_arch = "wasm32"))]
@@ -74,7 +74,7 @@ fn now_ns() -> u64 {
 }
 
 // ============================================================================
-// ABI Constants
+// ABI 常量
 // ============================================================================
 
 pub const AIWOS_ABI_VERSION: u32 = 3;
@@ -98,7 +98,7 @@ pub const AIWOS_QUERY_STATE_SNAPSHOT: u32 = 0;
 pub const AIWOS_QUERY_SCHEDULER_STATS: u32 = 1;
 
 // ============================================================================
-// ABI Struct Types  (repr(C) — layouts match C exactly)
+// ABI 结构体类型（repr(C)
 // ============================================================================
 
 #[repr(C)]
@@ -142,7 +142,7 @@ pub struct aiwos_host_api_t {
 }
 
 // ============================================================================
-// Internal Scheduler State
+// 内部调度器状态
 // ============================================================================
 
 const AIWOS_MAX_TASKS: usize = 64;
@@ -153,6 +153,10 @@ const AIWOS_TASK_RUNNING: u32 = 1;
 const AIWOS_TASK_BLOCKED: u32 = 2;
 const AIWOS_TASK_DONE: u32 = 4;
 const AIWOS_BLOCK_NONE: u32 = 0;
+const AIWOS_BLOCK_EVENT: u32 = 1;
+const AIWOS_BLOCK_TIMEOUT: u32 = 2;
+const AIWOS_BLOCK_RESOURCE: u32 = 3;
+const AIWOS_BLOCK_AI_INFERENCE: u32 = 4;
 const INVALID_IDX: u32 = AIWOS_MAX_TASKS as u32;
 
 #[repr(C)]
@@ -195,7 +199,33 @@ static mut TOTAL_TICKS: u64 = 0;
 static mut LAST_TICK_NS: u64 = 0;
 
 // ============================================================================
-// Exported ABI Functions
+// Nice → Weight 转换（Linux CFS 权重表）
+// ============================================================================
+
+const NICE_TO_WEIGHT: [u32; 40] = [
+    /* -20 */ 88761, 71755, 56483, 46273, 36291,
+    /* -15 */ 29154, 23254, 18705, 14949, 11916,
+    /* -10 */  9548,  7620,  6100,  4904,  3906,
+    /*  -5 */  3121,  2501,  1991,  1586,  1277,
+    /*   0 */  1024,   820,   655,   526,   423,
+    /*   5 */   335,   272,   215,   172,   137,
+    /*  10 */   110,    87,    70,    56,    45,
+    /*  15 */    36,    29,    23,    18,    15,
+];
+
+fn nice_to_weight(nice: i32) -> u32 {
+    let idx = nice.clamp(-20, 19) + 20;
+    NICE_TO_WEIGHT[idx as usize]
+}
+
+#[allow(dead_code)]
+fn calc_delta_vruntime(delta_ns: u64, weight: u32) -> u64 {
+    let w = if weight == 0 { 1024 } else { weight };
+    delta_ns * 1024 / w as u64
+}
+
+// ============================================================================
+// 导出 ABI 函数
 // ============================================================================
 
 #[no_mangle]
@@ -213,7 +243,12 @@ pub unsafe extern "C" fn aiwos_init(host: *const aiwos_host_api_t) -> aiwos_stat
         return AIWOS_ERR_INCOMPATIBLE_ABI;
     }
 
-    // Store host callbacks on native (wasm uses imports instead)
+    #[cfg(not(target_arch = "wasm32"))]
+    if host_ref.log.is_none() || host_ref.now_ns.is_none() {
+        return AIWOS_ERR_INCOMPATIBLE_ABI;
+    }
+
+    // 原生目标：存储宿主回调（wasm 通过导入）
     #[cfg(not(target_arch = "wasm32"))]
     {
         HOST_LOG = host_ref.log;
@@ -223,7 +258,7 @@ pub unsafe extern "C" fn aiwos_init(host: *const aiwos_host_api_t) -> aiwos_stat
         HOST_REALLOC = host_ref.realloc;
     }
 
-    // Reset scheduler state
+    // 重置调度器状态
     TICK_COUNT = 0;
     LAST_NOW_NS = 0;
     LAST_EVENT_TYPE = 0;
@@ -274,7 +309,7 @@ pub extern "C" fn aiwos_tick(tick_now_ns: u64) -> aiwos_status_t {
         LAST_TICK_NS = tick_now_ns;
         LAST_NOW_NS = tick_now_ns;
 
-        // Update current task vruntime
+        // 更新当前任务的 vruntime
         if CURRENT_IDX < AIWOS_MAX_TASKS as u32 {
             let task = &mut TASKS[CURRENT_IDX as usize];
             if task.state == AIWOS_TASK_RUNNING {
@@ -288,7 +323,7 @@ pub extern "C" fn aiwos_tick(tick_now_ns: u64) -> aiwos_status_t {
             }
         }
 
-        // Check blocked task timeouts
+        // 检查阻塞任务是否超时
         for i in 0..TASK_COUNT as usize {
             let task = &mut TASKS[i];
             if task.state == AIWOS_TASK_BLOCKED
@@ -405,7 +440,251 @@ pub extern "C" fn aiwos_shutdown() {
 }
 
 // ============================================================================
-// Bump Allocator  (wasm only — JS constructs structs in linear memory)
+// 任务管理 ABI 函数
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_create(context: *mut u8) -> u32 {
+    if !INITIALIZED || TASK_COUNT >= AIWOS_MAX_TASKS as u32 {
+        return 0;
+    }
+    let id = TASK_COUNT.wrapping_add(1);
+    let idx = TASK_COUNT as usize;
+    TASKS[idx] = Task {
+        id,
+        state: AIWOS_TASK_READY,
+        vruntime: MIN_VRUNTIME,
+        runtime_accum: 0,
+        block_reason: AIWOS_BLOCK_NONE,
+        block_timeout: 0,
+        wait_event: 0,
+        nice: 0,
+        weight: 1024,
+        context,
+    };
+    TASK_COUNT += 1;
+    id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_destroy(task_id: u32) -> aiwos_status_t {
+    if !INITIALIZED {
+        return AIWOS_ERR_NOT_INITIALIZED;
+    }
+    let found = aiwos_task_find_index(task_id);
+    if found < 0 {
+        return AIWOS_ERR_NOT_FOUND;
+    }
+    let idx = found as usize;
+    let last = (TASK_COUNT - 1) as usize;
+
+    // 在压缩前更新 CURRENT_IDX
+    if CURRENT_IDX == idx as u32 {
+        CURRENT_IDX = INVALID_IDX;
+    } else if CURRENT_IDX == last as u32 {
+        CURRENT_IDX = idx as u32; // 被交换到 idx
+    }
+
+    if idx != last {
+        TASKS[idx] = TASKS[last];
+    }
+    TASKS[last] = Task {
+        id: 0, state: 0, vruntime: 0, runtime_accum: 0,
+        block_reason: 0, block_timeout: 0, wait_event: 0,
+        nice: 0, weight: 1024, context: ptr::null_mut(),
+    };
+    TASK_COUNT -= 1;
+    AIWOS_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_find_index(task_id: u32) -> i32 {
+    if !INITIALIZED || task_id == 0 {
+        return -1;
+    }
+    for i in 0..TASK_COUNT as usize {
+        if TASKS[i].id == task_id {
+            return i as i32;
+        }
+    }
+    -1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_get(task_id: u32) -> *mut u8 {
+    if !INITIALIZED {
+        return ptr::null_mut();
+    }
+    let idx = aiwos_task_find_index(task_id);
+    if idx < 0 {
+        return ptr::null_mut();
+    }
+    TASKS[idx as usize].context
+}
+
+// ============================================================================
+// 任务状态控制 ABI 函数
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_yield() -> aiwos_status_t {
+    if !INITIALIZED {
+        return AIWOS_ERR_NOT_INITIALIZED;
+    }
+    if CURRENT_IDX >= AIWOS_MAX_TASKS as u32 {
+        return AIWOS_ERR_NOT_FOUND;
+    }
+    let curr = &mut TASKS[CURRENT_IDX as usize];
+    if curr.state != AIWOS_TASK_RUNNING {
+        return AIWOS_ERR_INVALID_ARGUMENT;
+    }
+    curr.state = AIWOS_TASK_READY;
+    CURRENT_IDX = INVALID_IDX;
+    AIWOS_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_block(
+    reason: u32,
+    wait_event: u32,
+    timeout_ns: u64,
+) -> aiwos_status_t {
+    if !INITIALIZED {
+        return AIWOS_ERR_NOT_INITIALIZED;
+    }
+    if CURRENT_IDX >= AIWOS_MAX_TASKS as u32 {
+        return AIWOS_ERR_NOT_FOUND;
+    }
+    let curr = &mut TASKS[CURRENT_IDX as usize];
+    if curr.state != AIWOS_TASK_RUNNING {
+        return AIWOS_ERR_INVALID_ARGUMENT;
+    }
+    curr.state = AIWOS_TASK_BLOCKED;
+    curr.block_reason = reason;
+    curr.wait_event = wait_event;
+    curr.block_timeout = timeout_ns;
+    CURRENT_IDX = INVALID_IDX;
+    AIWOS_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_wakeup(task_id: u32) -> aiwos_status_t {
+    if !INITIALIZED {
+        return AIWOS_ERR_NOT_INITIALIZED;
+    }
+    let idx = aiwos_task_find_index(task_id);
+    if idx < 0 {
+        return AIWOS_ERR_NOT_FOUND;
+    }
+    TASKS[idx as usize].state = AIWOS_TASK_READY;
+    AIWOS_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_wakeup_by_event(event_type: u32) -> i32 {
+    if !INITIALIZED {
+        return -1;
+    }
+    let mut count = 0i32;
+    for i in 0..TASK_COUNT as usize {
+        if TASKS[i].wait_event == event_type && TASKS[i].state == AIWOS_TASK_BLOCKED {
+            TASKS[i].state = AIWOS_TASK_READY;
+            count += 1;
+        }
+    }
+    count
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_task_complete() -> aiwos_status_t {
+    if !INITIALIZED {
+        return AIWOS_ERR_NOT_INITIALIZED;
+    }
+    if CURRENT_IDX >= AIWOS_MAX_TASKS as u32 {
+        return AIWOS_ERR_NOT_FOUND;
+    }
+    let curr = &mut TASKS[CURRENT_IDX as usize];
+    if curr.state != AIWOS_TASK_RUNNING {
+        return AIWOS_ERR_INVALID_ARGUMENT;
+    }
+    curr.state = AIWOS_TASK_DONE;
+    CURRENT_IDX = INVALID_IDX;
+    AIWOS_OK
+}
+
+// ============================================================================
+// 调度与查询 ABI 函数
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_schedule_next() -> u32 {
+    if !INITIALIZED {
+        return 0;
+    }
+    // 如果当前任务还在 RUNNING，先设为 READY
+    if CURRENT_IDX < AIWOS_MAX_TASKS as u32 {
+        let curr = &mut TASKS[CURRENT_IDX as usize];
+        if curr.state == AIWOS_TASK_RUNNING {
+            curr.state = AIWOS_TASK_READY;
+        }
+    }
+    // 挑选 vruntime 最小的 READY 任务
+    let mut best_idx = INVALID_IDX;
+    let mut best_vruntime = u64::MAX;
+    for i in 0..TASK_COUNT as usize {
+        if TASKS[i].state == AIWOS_TASK_READY && TASKS[i].vruntime < best_vruntime {
+            best_vruntime = TASKS[i].vruntime;
+            best_idx = i as u32;
+        }
+    }
+    if best_idx == INVALID_IDX {
+        CURRENT_IDX = INVALID_IDX;
+        return 0;
+    }
+    CURRENT_IDX = best_idx;
+    TASKS[best_idx as usize].state = AIWOS_TASK_RUNNING;
+    TASKS[best_idx as usize].id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_current() -> u32 {
+    if !INITIALIZED {
+        return 0;
+    }
+    if CURRENT_IDX >= AIWOS_MAX_TASKS as u32 {
+        return 0;
+    }
+    TASKS[CURRENT_IDX as usize].id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_current_index() -> u32 {
+    if !INITIALIZED {
+        return INVALID_IDX;
+    }
+    CURRENT_IDX
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_has_ready() -> i32 {
+    if !INITIALIZED {
+        return 0;
+    }
+    for i in 0..TASK_COUNT as usize {
+        if TASKS[i].state == AIWOS_TASK_READY {
+            return 1;
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aiwos_nice_to_weight(nice: i32) -> u32 {
+    nice_to_weight(nice)
+}
+
+// ============================================================================
+// 碰撞分配器（仅 wasm — JS 在线性内存中构造结构体）
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
@@ -444,10 +723,28 @@ pub unsafe extern "C" fn aiwos_alloc_reset() {
 }
 
 // ============================================================================
-// Panic Handler
+// Panic 处理函数
 // ============================================================================
 
+// 测试时由 std 提供 panic_handler，避免冲突
+#[cfg(not(test))]
 #[panic_handler]
 fn core_panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+//
+// 全局共享的 static mut 状态使测试无法安全并行 —— 使用 Mutex 序列化。
+// 每个会修改全局状态的测试函数都从 `lock()` 或 `lock_and_init()` 获取守卫，
+// 守卫存活期间其他测试被阻塞。
+//
+// 使用方式（在测试函数第一行）：
+//   let _guard = lock();         // 重置 + init
+//   let _guard = lock_raw();     // 仅重置，不 init
+
+
+#[cfg(test)]
+mod tests;

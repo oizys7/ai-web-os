@@ -7,3 +7,8 @@ build/
 target/
 Cargo.lock
 
+# frontend build artifacts
+apps/browser-digital-twin/dist/
+apps/browser-digital-twin/node_modules/
+apps/browser-digital-twin/index.html.bak
+
